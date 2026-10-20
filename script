@@ -298,6 +298,14 @@ do
 
 	_G.Settings = _G.Config
 
+	print("[ESP] Инициализация модуля ESP...")
+
+	-- Проверка доступности Drawing API — без него ESP физически не может рисовать
+	if Drawing == nil then
+		warn("[ESP] ОШИБКА: библиотека Drawing недоступна на этом клиенте — ESP не сможет ничего нарисовать!")
+		return
+	end
+
 	local visuals = {}
 	local playerCache = {}
 	local espConnections = {}
@@ -506,7 +514,10 @@ do
 	local function cacheCharacterParts(player, character)
 		local root = character:FindFirstChild("HumanoidRootPart")
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if not root or not humanoid then return end
+		if not root or not humanoid then
+			warn("[ESP] Персонаж " .. player.Name .. " не закэширован: нет HumanoidRootPart или Humanoid")
+			return
+		end
 
 		local parts = {}
 		local partList = {}
@@ -835,11 +846,29 @@ do
 		return nearest
 	end
 
+	local lastDiagTime = 0
+
 	local function updateEsp()
 		local camera = workspace.CurrentCamera
 		if not camera then return end
 
 		updateCachedColors()
+
+		-- Диагностика в консоль раз в 5 секунд: видно, жив ли ESP и какие флаги включены
+		local now = os.clock()
+		if now - lastDiagTime >= 5 then
+			lastDiagTime = now
+			local cachedCount = 0
+			for _ in pairs(playerCache) do cachedCount = cachedCount + 1 end
+			local c = _G.Config
+			print(string.format(
+				"[ESP] статус: игроков=%d закэшировано=%d | флаги: box=%s name=%s dist=%s tag=%s hp=%s tracer=%s skeleton=%s",
+				#playerList, cachedCount,
+				tostring(c.showBox), tostring(c.showName), tostring(c.showDistance),
+				tostring(c.showSelectedTag), tostring(c.showHealthBar),
+				tostring(c.showTracers), tostring(c.showSkeleton)
+			))
+		end
 
 		local camPos = camera.CFrame.Position
 		local viewport = camera.ViewportSize
@@ -872,7 +901,10 @@ do
 	end
 
 	local TweenService = game:GetService("TweenService")
-	local livingFolder = workspace:WaitForChild("Living")
+	-- ИСПРАВЛЕНО: раньше здесь было workspace:WaitForChild("Living") БЕЗ таймаута.
+	-- Этот вызов блокировал весь оставшийся код блока ESP, включая привязку
+	-- рендер-лупа ниже. Если папка Living не появлялась — ESP никогда не запускался.
+	-- Теперь ожидание Living происходит в фоне и не мешает основному ESP.
 	local function setupCharacter(character)
 		if not character:IsA("Model") then
 			return
@@ -1052,15 +1084,30 @@ do
 		end)
 	end
 
-	for _, character in ipairs(livingFolder:GetChildren()) do
-		task.spawn(setupCharacter, character)
-	end
+	task.spawn(function()
+		local livingFolder = workspace:FindFirstChild("Living") or workspace:WaitForChild("Living", 15)
+		if not livingFolder then
+			warn("[ESP] Папка Workspace.Living не найдена за 15 секунд — индикатор BlockCapacity отключён, но ESP игроков работает.")
+			return
+		end
+		print("[ESP] Папка Workspace.Living найдена — индикатор BlockCapacity включён")
 
-	table.insert(espConnections, livingFolder.ChildAdded:Connect(function(character)
-		task.spawn(setupCharacter, character)
-	end))
+		for _, character in ipairs(livingFolder:GetChildren()) do
+			task.spawn(setupCharacter, character)
+		end
 
+		table.insert(espConnections, livingFolder.ChildAdded:Connect(function(character)
+			task.spawn(setupCharacter, character)
+		end))
+	end)
+
+	-- Привязываем рендер-луп ESP СРАЗУ, не дожидаясь папки Living
 	RunService:BindToRenderStep("DrawingESP_Update", Enum.RenderPriority.Camera.Value + 1, updateEsp)
+	print("[ESP] Рендер-луп привязан (DrawingESP_Update) — ESP активен. Конфиг: box=" .. tostring(_G.Config.showBox)
+		.. ", name=" .. tostring(_G.Config.showName)
+		.. ", distance=" .. tostring(_G.Config.showDistance)
+		.. ", tracer=" .. tostring(_G.Config.showTracers)
+		.. ", skeleton=" .. tostring(_G.Config.showSkeleton))
 
 	_G.DrawingESP_Cleanup = function()
 		pcall(function() RunService:UnbindFromRenderStep("DrawingESP_Update") end)
@@ -3809,6 +3856,15 @@ do
 		pcall(_G.AD_FunctionsCleanup)
 	end
 	addFunctionConnection(UserInputService.InputBegan:Connect(function(input, gp)
+		-- Handle aimbot before gameProcessed check so mouse button bindings (LMB/RMB) work
+		local aimbotKey = getKey("aimbot")
+		if input.KeyCode == aimbotKey
+			or (aimbotKey == Enum.KeyCode.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
+			or (aimbotKey == Enum.KeyCode.MouseButton2 and input.UserInputType == Enum.UserInputType.MouseButton2) then
+			holdingAimbot = true
+			return
+		end
+
 		if gp then return end
 
 		if input.KeyCode == getKey("selectTarget") then
@@ -3819,8 +3875,6 @@ do
 			startSpeedhack()
 		elseif input.KeyCode == getKey("fly") then
 			toggleFly()
-		elseif input.KeyCode == getKey("aimbot") then
-			holdingAimbot = true
 		elseif input.KeyCode == getKey("standPilot") and (standPilotActive or _G.Config.standPilotEnabled) then
 			if _G.Config.pilotMode == "Stand Only" then
 				makethis()
@@ -3835,9 +3889,12 @@ do
 	end))
 
 	addFunctionConnection(UserInputService.InputEnded:Connect(function(input)
+		local aimbotKey = getKey("aimbot")
 		if input.KeyCode == getKey("speedhack") then
 			stopSpeedhack()
-		elseif input.KeyCode == getKey("aimbot") then
+		elseif input.KeyCode == aimbotKey
+			or (aimbotKey == Enum.KeyCode.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
+			or (aimbotKey == Enum.KeyCode.MouseButton2 and input.UserInputType == Enum.UserInputType.MouseButton2) then
 			holdingAimbot = false
 		end
 	end))
@@ -5285,6 +5342,7 @@ do
 		buttonCorner.Parent = setButton
 
 		local captureConn = nil
+		local suppressNextClick = false
 
 		local function applyKey(keyName)
 			if not keyName or keyName == "" or not Enum.KeyCode[keyName] then
@@ -5302,11 +5360,24 @@ do
 		end)
 
 		setButton.MouseButton1Click:Connect(function()
+			if suppressNextClick then
+				suppressNextClick = false
+				return
+			end
 			setButton.Text = "..."
 			if captureConn then captureConn:Disconnect() end
 			captureConn = UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
-				if gameProcessed or inputObject.UserInputType ~= Enum.UserInputType.Keyboard then return end
-				applyKey(inputObject.KeyCode.Name)
+				if inputObject.UserInputType == Enum.UserInputType.Keyboard then
+					if gameProcessed then return end
+					applyKey(inputObject.KeyCode.Name)
+				elseif inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
+					applyKey("MouseButton1")
+					suppressNextClick = true
+				elseif inputObject.UserInputType == Enum.UserInputType.MouseButton2 then
+					applyKey("MouseButton2")
+				else
+					return
+				end
 				setButton.Text = "Set"
 				captureConn:Disconnect()
 				captureConn = nil
