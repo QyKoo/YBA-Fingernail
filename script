@@ -184,7 +184,6 @@ do
 	}
 
 	local defaultKeybinds = {
-		OpenMenu = "Delete",
 		selectTarget = "C",
 		dash = "Tab",
 		speedhack = "CapsLock",
@@ -265,13 +264,98 @@ do
 		return true
 	end
 
+	-- ===== Профили настроек (все конфиги в одном файле ad/profiles.json) =====
+	local dir_profiles = "ad/profiles.json"
+
+	local function sanitizeProfileName(name)
+		return string.gsub(string.sub(tostring(name or ""), 1, 32), "[^%w%-_ ]", "")
+	end
+
+	-- Читаем таблицу профилей из файла; при любой проблеме возвращаем пустую таблицу
+	local function loadProfilesTable()
+		local ok, content = pcall(function() return readfile(dir_profiles) end)
+		if not ok or type(content) ~= "string" then return {} end
+		local okDecode, data = pcall(function() return HttpService:JSONDecode(content) end)
+		if not okDecode or type(data) ~= "table" then return {} end
+		return data
+	end
+
+	local function saveProfilesTable(profiles)
+		if not writefile then return false, "filesystem unavailable" end
+		ensureConfigFolder()
+		local ok, err = pcall(function()
+			writefile(dir_profiles, HttpService:JSONEncode(profiles))
+		end)
+		if not ok then
+			warn("[CONFIG] Не удалось записать файл конфигов: " .. tostring(err))
+		end
+		return ok, err
+	end
+
+	function ListProfiles()
+		local names = {}
+		local profiles = loadProfilesTable()
+		for name in pairs(profiles) do
+			if type(name) == "string" then table.insert(names, name) end
+		end
+		table.sort(names)
+		return names
+	end
+
+	function SaveProfile(name)
+		name = sanitizeProfileName(name)
+		if name == "" then return false, "empty name" end
+		if not writefile then return false, "filesystem unavailable" end
+		local profiles = loadProfilesTable()
+		profiles[name] = _G.Config
+		return saveProfilesTable(profiles)
+	end
+
+	function LoadProfileData(name)
+		name = sanitizeProfileName(name)
+		if name == "" then return nil end
+		local profiles = loadProfilesTable()
+		local data = profiles[name]
+		if type(data) ~= "table" then return nil end
+		return mergeDefaults(data, defaultConfig)
+	end
+
+	function DeleteProfile(name)
+		name = sanitizeProfileName(name)
+		if name == "" then return false end
+		local profiles = loadProfilesTable()
+		if profiles[name] == nil then return false end
+		profiles[name] = nil
+		return saveProfilesTable(profiles)
+	end
+
+	function ResetConfigToDefaults()
+		for k in pairs(_G.Config) do _G.Config[k] = nil end
+		for k, v in pairs(defaultConfig) do _G.Config[k] = v end
+		return SaveConfig()
+	end
+
 	function keyCode(name)
-		return Enum.KeyCode[_G.Keybinds[name] or defaultKeybinds[name]]
+		local keyName = _G.Keybinds[name] or defaultKeybinds[name]
+		if keyName == nil then return nil end
+		-- Бинды на кнопки мыши (ЛКМ/ПКМ/СКМ) запрещены
+		if type(keyName) == "string" and keyName:match("^MouseButton%d$") then return nil end
+		local ok, key = pcall(function() return Enum.KeyCode[keyName] end)
+		if ok and key ~= Enum.KeyCode.Unknown then return key end
+		return nil
 	end
 
 
 	function getKey(name)
 		return keyCode(name)
+	end
+
+	-- Проверка совпадения ввода с биндом (только клавиши клавиатуры —
+	-- бинды на кнопки мыши отключены).
+	function inputMatchesBind(input, name)
+		local key = getKey(name)
+		if key == nil then return false end
+		return input.KeyCode == key
 	end
 
 
@@ -867,7 +951,7 @@ do
 				tostring(c.showBox), tostring(c.showName), tostring(c.showDistance),
 				tostring(c.showSelectedTag), tostring(c.showHealthBar),
 				tostring(c.showTracers), tostring(c.showSkeleton)
-			))
+				))
 		end
 
 		local camPos = camera.CFrame.Position
@@ -2455,11 +2539,11 @@ do
 		task.wait(delay)
 		if not self.Replaying then return end
 		if event.Type == "KeyDown" then
-			local keyCode = Enum.KeyCode[event.Key]
-			if keyCode then self:SimulateKeyDown(keyCode) end
+			local okKey, keyCode = pcall(function() return Enum.KeyCode[event.Key] end)
+			if okKey and keyCode then self:SimulateKeyDown(keyCode) end
 		elseif event.Type == "KeyUp" then
-			local keyCode = Enum.KeyCode[event.Key]
-			if keyCode then self:SimulateKeyUp(keyCode) end
+			local okKey, keyCode = pcall(function() return Enum.KeyCode[event.Key] end)
+			if okKey and keyCode then self:SimulateKeyUp(keyCode) end
 		end
 		self.ReplayIndex = self.ReplayIndex + 1
 		task.spawn(function() self:ProcessReplay() end)
@@ -2471,8 +2555,8 @@ do
 		self.ReplayIndex = 1
 		for _, event in ipairs(self.Events) do
 			if event.Type == "KeyDown" then
-				local keyCode = Enum.KeyCode[event.Key]
-				if keyCode then self:SimulateKeyUp(keyCode) end
+				local okKey, keyCode = pcall(function() return Enum.KeyCode[event.Key] end)
+				if okKey and keyCode then self:SimulateKeyUp(keyCode) end
 			end
 		end
 		print("Replay stopped")
@@ -3589,7 +3673,8 @@ do
 			local input = sequence.releaseInput
 
 			if type(input) == "string" then
-				input = Enum.KeyCode[input]
+				local okInput, keyCodeVal = pcall(function() return Enum.KeyCode[input] end)
+				if okInput then input = keyCodeVal end
 			end
 
 			remote:FireServer("InputEnded", {
@@ -3856,45 +3941,39 @@ do
 		pcall(_G.AD_FunctionsCleanup)
 	end
 	addFunctionConnection(UserInputService.InputBegan:Connect(function(input, gp)
-		-- Handle aimbot before gameProcessed check so mouse button bindings (LMB/RMB) work
-		local aimbotKey = getKey("aimbot")
-		if input.KeyCode == aimbotKey
-			or (aimbotKey == Enum.KeyCode.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
-			or (aimbotKey == Enum.KeyCode.MouseButton2 and input.UserInputType == Enum.UserInputType.MouseButton2) then
+		-- Обрабатываем аимбот до проверки gameProcessed, чтобы бинды на кнопки мыши (ЛКМ/ПКМ) работали
+		if inputMatchesBind(input, "aimbot") then
 			holdingAimbot = true
 			return
 		end
 
 		if gp then return end
 
-		if input.KeyCode == getKey("selectTarget") then
+		if inputMatchesBind(input, "selectTarget") then
 			_G.Config.input_TargetSurvName = findTargetInCircle()
-		elseif input.KeyCode == getKey("dash") then
+		elseif inputMatchesBind(input, "dash") then
 			dash()
-		elseif input.KeyCode == getKey("speedhack") then
+		elseif inputMatchesBind(input, "speedhack") then
 			startSpeedhack()
-		elseif input.KeyCode == getKey("fly") then
+		elseif inputMatchesBind(input, "fly") then
 			toggleFly()
-		elseif input.KeyCode == getKey("standPilot") and (standPilotActive or _G.Config.standPilotEnabled) then
+		elseif inputMatchesBind(input, "standPilot") and (standPilotActive or _G.Config.standPilotEnabled) then
 			if _G.Config.pilotMode == "Stand Only" then
 				makethis()
 			else
 				startStandPilot()
 			end
-		elseif input.KeyCode == getKey("tpToTrgt") then
+		elseif inputMatchesBind(input, "tpToTrgt") then
 			tpToSelectedTarget()
-		elseif input.KeyCode == getKey("tpToDioOverHeaven") then
+		elseif inputMatchesBind(input, "tpToDioOverHeaven") then
 			tpToDioOH()
 		end
 	end))
 
 	addFunctionConnection(UserInputService.InputEnded:Connect(function(input)
-		local aimbotKey = getKey("aimbot")
-		if input.KeyCode == getKey("speedhack") then
+		if inputMatchesBind(input, "speedhack") then
 			stopSpeedhack()
-		elseif input.KeyCode == aimbotKey
-			or (aimbotKey == Enum.KeyCode.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseButton1)
-			or (aimbotKey == Enum.KeyCode.MouseButton2 and input.UserInputType == Enum.UserInputType.MouseButton2) then
+		elseif inputMatchesBind(input, "aimbot") then
 			holdingAimbot = false
 		end
 	end))
@@ -4010,6 +4089,21 @@ do
 			titleBg     = Color3.fromRGB(26, 26, 26),
 			dragIcon    = Color3.fromRGB(90, 90, 95),
 		},
+		Monochrome = {
+			background  = Color3.fromRGB(245, 245, 245),
+			surface     = Color3.fromRGB(250, 250, 250),
+			accent      = Color3.fromRGB(15, 15, 15),
+			text        = Color3.fromRGB(20, 20, 20),
+			textDim     = Color3.fromRGB(110, 110, 110),
+			hover       = Color3.fromRGB(225, 225, 225),
+			stroke      = Color3.fromRGB(190, 190, 190),
+			sliderBack  = Color3.fromRGB(210, 210, 210),
+			dropdownBg  = Color3.fromRGB(240, 240, 240),
+			dropdownItem= Color3.fromRGB(245, 245, 245),
+			scrollBar   = Color3.fromRGB(15, 15, 15),
+			titleBg     = Color3.fromRGB(250, 250, 250),
+			dragIcon    = Color3.fromRGB(160, 160, 160),
+		},
 	}
 
 	local currentThemeName = (_G.Config and THEMES[_G.Config.uiTheme]) and _G.Config.uiTheme or "Emerald"
@@ -4119,7 +4213,7 @@ do
 
 		local frame = Instance.new("Frame")
 		frame.Name = "MainFrame"
-		frame.Size = UDim2.new(0, 700, 0, 450)
+		frame.Size = UDim2.new(0, 450, 0, 700)
 		frame.Position = UDim2.new(0.5, -350, 0.5, -225)
 		frame.BackgroundColor3 = T.background
 		frame.BackgroundTransparency = 0
@@ -4129,7 +4223,7 @@ do
 		frame.Parent = screenGui
 
 		local corner = Instance.new("UICorner")
-		corner.CornerRadius = UDim.new(0, 15)
+		corner.CornerRadius = UDim.new(0, 8)
 		corner.Parent = frame
 
 		local frameStroke = Instance.new("UIStroke")
@@ -4192,134 +4286,28 @@ do
 		welcomeFrame.ScrollingDirection = Enum.ScrollingDirection.Y
 		welcomeFrame.Parent = frame
 
-		local themeFrame = Instance.new("Frame")
-		themeFrame.Name = "ThemeSelector"
-		themeFrame.Size = UDim2.new(0, 148, 0, 20)
-		themeFrame.Position = UDim2.new(0, 11, 1, -26)
-		themeFrame.BackgroundColor3 = T.background
-		themeFrame.BorderSizePixel = 0
-		themeFrame.ZIndex = 200
-		themeFrame.ClipsDescendants = false
-		themeFrame.Parent = frame
-
-		local themeFrameCorner = Instance.new("UICorner")
-		themeFrameCorner.CornerRadius = UDim.new(0, 6)
-		themeFrameCorner.Parent = themeFrame
-
-		local themeStroke = Instance.new("UIStroke")
-		themeStroke.Color = T.stroke
-		themeStroke.Transparency = 0.5
-		themeStroke.Thickness = 1
-		themeStroke.Parent = themeFrame
-
-		local themeLabel = Instance.new("TextLabel")
-		themeLabel.Size = UDim2.new(1, -8, 1, 0)
-		themeLabel.Position = UDim2.new(0, 8, 0, 0)
-		themeLabel.BackgroundTransparency = 1
-		themeLabel.Text = "Theme: " .. currentThemeName
-		themeLabel.TextColor3 = T.textDim
-		themeLabel.TextSize = 11
-		themeLabel.TextXAlignment = Enum.TextXAlignment.Left
-		themeLabel.Font = Enum.Font.SourceSansBold
-		themeLabel.ZIndex = 201
-		themeLabel.Parent = themeFrame
-
-		local themeList = Instance.new("Frame")
-		themeList.Size = UDim2.new(1, 0, 0, 0)
-		themeList.Position = UDim2.new(0, 0, 1, 2)
-		themeList.BackgroundColor3 = T.hover
-		themeList.BackgroundTransparency = 0.5
-		themeList.BorderSizePixel = 0
-		themeList.ClipsDescendants = true
-		themeList.ZIndex = 202
-		themeList.Parent = themeFrame
-
-		local themeListCorner = Instance.new("UICorner")
-		themeListCorner.CornerRadius = UDim.new(0, 6)
-		themeListCorner.Parent = themeList
-
-		local themeListLayout = Instance.new("UIListLayout")
-		themeListLayout.Padding = UDim.new(0, 2)
-		themeListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-		themeListLayout.Parent = themeList
-
-		local themeOpen = false
-		local themeTween = nil
-		local themeNames = {"Emerald", "Violet", "Crimson"}
-
-		local function buildThemeButtons()
-			for _, c in ipairs(themeList:GetChildren()) do
-				if not c:IsA("UIListLayout") then c:Destroy() end
-			end
-			for _, name in ipairs(themeNames) do
-				local btn = Instance.new("TextButton")
-				btn.Size = UDim2.new(1, -4, 0, 20)
-				btn.BackgroundColor3 = T.dropdownItem
-				btn.BackgroundTransparency = 0
-				btn.BorderSizePixel = 0
-				btn.Text = name
-				btn.TextColor3 = name == currentThemeName and T.accent or T.textDim
-				btn.TextSize = 11
-				btn.Font = name == currentThemeName and Enum.Font.SourceSansBold or Enum.Font.SourceSans
-				btn.ZIndex = 203
-				btn.Parent = themeList
-
-				local btnCorner = Instance.new("UICorner")
-				btnCorner.CornerRadius = UDim.new(0, 5)
-				btnCorner.Parent = btn
-
-				btn.MouseButton1Click:Connect(function()
-					currentThemeName = name
-					T = THEMES[name]
-					if _G.Config then
-						_G.Config.uiTheme = name
-						if SaveConfig then SaveConfig() end
-					end
-					themeLabel.Text = "Theme: " .. name
-					themeOpen = false
-					if themeTween then themeTween:Cancel() end
-					themeTween = TweenService:Create(themeList, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-						Size = UDim2.new(1, 0, 0, 0)
-					})
-					themeTween:Play()
-					fireTheme()
-					buildThemeButtons()
-				end)
-			end
-		end
-
-		buildThemeButtons()
-
-		themeFrame.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				themeOpen = not themeOpen
-				if themeTween then themeTween:Cancel() end
-				if themeOpen then
-					themeTween = TweenService:Create(themeList, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-						Size = UDim2.new(1, 0, 0, #themeNames * 22 + 4)
-					})
-				else
-					themeTween = TweenService:Create(themeList, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-						Size = UDim2.new(1, 0, 0, 0)
-					})
-				end
-				themeTween:Play()
-			end
-		end)
+		-- Выбор темы перенесён во вкладку Settings (Library:SetTheme ниже).
+		-- Старый селектор темы внизу экрана удалён.
 
 		registerThemeListener(function(theme)
 			frame.BackgroundColor3 = theme.background
 			frameStroke.Color = theme.stroke
 			welcomeFrame.BackgroundColor3 = theme.background
 			welcomeFrame.ScrollBarImageColor3 = theme.scrollBar
-			themeFrame.BackgroundColor3 = theme.background
-			themeStroke.Color = theme.stroke
-			themeLabel.TextColor3 = theme.textDim
-			themeList.BackgroundColor3 = theme.hover
-			themeList.BackgroundTransparency = 0.5
 			titleText.TextColor3 = theme.text
-			buildThemeButtons()
 		end)
+
+		function Library:SetTheme(name)
+			if not THEMES[name] then return false end
+			currentThemeName = name
+			T = THEMES[name]
+			if _G.Config then
+				_G.Config.uiTheme = name
+				if SaveConfig then SaveConfig() end
+			end
+			fireTheme()
+			return true
+		end
 
 		activeMainUI = {
 			ScreenGui = screenGui,
@@ -5287,6 +5275,107 @@ do
 		}
 	end
 
+	function Library:CreateButton(tabData, text, callback)
+		if not tabData or not tabData.elementContainer then return nil end
+
+		local frame = Instance.new("Frame")
+		frame.Size = UDim2.new(1, 0, 0, 26)
+		frame.BackgroundColor3 = T.surface
+		frame.BackgroundTransparency = 0
+		frame.BorderSizePixel = 0
+		frame.Parent = tabData.elementContainer
+
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.new(1, -8, 1, 0)
+		btn.Position = UDim2.new(0, 4, 0, 0)
+		btn.BackgroundColor3 = T.dropdownBg
+		btn.BorderSizePixel = 0
+		btn.AutoButtonColor = true
+		btn.Text = text
+		btn.TextColor3 = T.text
+		btn.TextSize = 12
+		btn.TextXAlignment = Enum.TextXAlignment.Center
+		btn.TextYAlignment = Enum.TextYAlignment.Center
+		btn.FontFace = Font.new("rbxasset://fonts/families/Inconsolata.json", Enum.FontWeight.Bold)
+		btn.Parent = frame
+
+		local btnCorner = Instance.new("UICorner")
+		btnCorner.CornerRadius = UDim.new(0, 6)
+		btnCorner.Parent = btn
+
+		btn.MouseButton1Click:Connect(function()
+			if callback then callback() end
+		end)
+
+		table.insert(tabData.elements, frame)
+
+		registerThemeListener(function(theme)
+			frame.BackgroundColor3 = theme.surface
+			btn.BackgroundColor3 = theme.dropdownBg
+			btn.TextColor3 = theme.text
+		end)
+
+		return btn
+	end
+
+	function Library:CreateTextBox(tabData, labelText, placeholder, callback)
+		if not tabData or not tabData.elementContainer then return nil end
+
+		local frame = Instance.new("Frame")
+		frame.Size = UDim2.new(1, 0, 0, 26)
+		frame.BackgroundColor3 = T.surface
+		frame.BackgroundTransparency = 0
+		frame.BorderSizePixel = 0
+		frame.Parent = tabData.elementContainer
+
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(0.42, -8, 1, 0)
+		label.Position = UDim2.new(0, 4, 0, 0)
+		label.BackgroundTransparency = 1
+		label.Text = labelText
+		label.TextColor3 = T.text
+		label.TextSize = 12
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextYAlignment = Enum.TextYAlignment.Center
+		label.FontFace = Font.new("rbxasset://fonts/families/Inconsolata.json", Enum.FontWeight.Bold)
+		label.Parent = frame
+
+		local box = Instance.new("TextBox")
+		box.Size = UDim2.new(0.55, 0, 1, -8)
+		box.Position = UDim2.new(0.45, 0, 0, 4)
+		box.BackgroundColor3 = T.dropdownBg
+		box.BorderSizePixel = 0
+		box.Text = ""
+		box.PlaceholderText = placeholder or "..."
+		box.TextColor3 = T.text
+		box.PlaceholderColor3 = T.textDim
+		box.TextSize = 12
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.FontFace = Font.new("rbxasset://fonts/families/Inconsolata.json", Enum.FontWeight.Bold)
+		box.ClearTextOnFocus = false
+		box.Parent = frame
+
+		local boxCorner = Instance.new("UICorner")
+		boxCorner.CornerRadius = UDim.new(0, 6)
+		boxCorner.Parent = box
+
+		box.FocusLost:Connect(function(enterPressed)
+			if callback then callback(box.Text, enterPressed) end
+		end)
+
+		table.insert(tabData.elements, frame)
+
+		registerThemeListener(function(theme)
+			frame.BackgroundColor3 = theme.surface
+			label.TextColor3 = theme.text
+			box.BackgroundColor3 = theme.dropdownBg
+			box.TextColor3 = theme.text
+			box.PlaceholderColor3 = theme.textDim
+		end)
+
+		return box
+	end
+
 	function Library:CreateKeybind(tabData, action, displayName)
 		if not tabData or not tabData.elementContainer then return nil end
 
@@ -5345,7 +5434,16 @@ do
 		local suppressNextClick = false
 
 		local function applyKey(keyName)
-			if not keyName or keyName == "" or not Enum.KeyCode[keyName] then
+			local validKey = false
+			if type(keyName) == "string" and keyName ~= "" then
+				-- Бинды на кнопки мыши (ЛКМ/ПКМ/СКМ) запрещены
+				if keyName:match("^MouseButton%d$") then
+					validKey = false
+				else
+					validKey = pcall(function() return Enum.KeyCode[keyName] end)
+				end
+			end
+			if not validKey then
 				input.Text = tostring(_G.Keybinds and _G.Keybinds[action] or "")
 				return false
 			end
@@ -5367,17 +5465,11 @@ do
 			setButton.Text = "..."
 			if captureConn then captureConn:Disconnect() end
 			captureConn = UserInputService.InputBegan:Connect(function(inputObject, gameProcessed)
-				if inputObject.UserInputType == Enum.UserInputType.Keyboard then
-					if gameProcessed then return end
-					applyKey(inputObject.KeyCode.Name)
-				elseif inputObject.UserInputType == Enum.UserInputType.MouseButton1 then
-					applyKey("MouseButton1")
-					suppressNextClick = true
-				elseif inputObject.UserInputType == Enum.UserInputType.MouseButton2 then
-					applyKey("MouseButton2")
-				else
+				if inputObject.UserInputType ~= Enum.UserInputType.Keyboard then
 					return
 				end
+				if gameProcessed then return end
+				applyKey(inputObject.KeyCode.Name)
 				setButton.Text = "Set"
 				captureConn:Disconnect()
 				captureConn = nil
@@ -5561,16 +5653,6 @@ do
 		end
 	end
 
-	UserInputService.InputBegan:Connect(function(input, gameProcessed)
-		if gameProcessed then return end
-		if not activeMainUI or not activeMainUI.Frame then return end
-		if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-
-		local openMenuKey = getKey and getKey("OpenMenu") or Enum.KeyCode.Delete
-		if input.KeyCode == openMenuKey then
-			activeMainUI.Frame.Visible = not activeMainUI.Frame.Visible
-		end
-	end)
 
 	local function updateDropdownItems(dropdown, items)
 		if not dropdown then return false end
@@ -5587,6 +5669,285 @@ do
 
 	-- MENU END
 	-----------------------------------------------
+
+	----------------------------------------------------------------
+	-- Rayfield Gen2 shim: подмена UI-слоя. Все вызовы Library:Create*
+	-- теперь создают элементы Rayfield. Логика и колбэки не изменены.
+	----------------------------------------------------------------
+	do
+		local Rayfield = nil
+		local window = nil
+		local classTabs = {}
+
+		local UserInputService = game:GetService("UserInputService")
+
+		local function getTab(tabData)
+			if type(tabData) == "table" then
+				return tabData.tab or tabData
+			end
+			return classTabs[tostring(tabData)]
+		end
+
+		function Library:CreateMainUI()
+			Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+			window = Rayfield:CreateWindow({
+				name = "Cheeze",
+				subtitle = "Admin Panel",
+				sidebarLayout = true,
+			})
+		end
+
+		function Library:CreateSub(text) end
+
+		function Library:CreateClass(text)
+			if not window then return nil end
+			local label = tostring(text)
+			local tab = window:CreateTab({ name = label })
+			classTabs[label] = tab
+			return label
+		end
+
+		function Library:CreateFunctionTab(classLabel, title)
+			local tab = getTab(classLabel)
+			if not tab then return nil end
+			tab:CreateSection({ name = tostring(title) })
+			return { tab = tab, classLabel = classLabel, title = title }
+		end
+
+		function Library:CreateToggle(tabData, text, currentValue, callback)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			return tab:CreateToggle({
+				name = tostring(text),
+				value = currentValue and true or false,
+				callback = callback,
+				forgetState = true,
+			})
+		end
+
+		function Library:CreateSlider(tabData, labelText, currentValue, min, max, callback)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			min = tonumber(min) or 0
+			max = tonumber(max) or 100
+			currentValue = tonumber(currentValue) or min
+			local increment = ((max - min) <= 2 or (min % 1 ~= 0) or (max % 1 ~= 0)) and 0.01 or 1
+			return tab:CreateSlider({
+				name = tostring(labelText),
+				range = { min, max },
+				value = currentValue,
+				increment = increment,
+				callback = callback,
+				forgetState = true,
+			})
+		end
+
+		-- Колорпикер: заменяет тройку слайдеров R/G/B.
+		-- rKey/gKey/bKey — ключи каналов цвета в _G.Config.
+		function Library:CreateColorPicker(tabData, labelText, rKey, gKey, bKey)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			local cfg = _G.Config
+			local current = Color3.fromRGB(
+				cfg[rKey] or 255,
+				cfg[gKey] or 255,
+				cfg[bKey] or 255
+			)
+			return tab:CreateColorPicker({
+				name = tostring(labelText),
+				color = current,
+				callback = function(color)
+					cfg[rKey] = math.floor(color.R * 255 + 0.5)
+					cfg[gKey] = math.floor(color.G * 255 + 0.5)
+					cfg[bKey] = math.floor(color.B * 255 + 0.5)
+					SaveConfig()
+				end,
+			})
+		end
+
+		function Library:CreateDropdown(tabData, labelText, items, defaultItem, multiSelect, callback)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			local options = {}
+			if type(items) == "table" then
+				for _, v in ipairs(items) do options[#options + 1] = tostring(v) end
+			end
+			local value = nil
+			if defaultItem ~= nil and table.find(options, tostring(defaultItem)) then
+				value = tostring(defaultItem)
+			end
+			return tab:CreateDropdown({
+				name = tostring(labelText),
+				options = options,
+				value = value,
+				multiSelect = multiSelect and true or false,
+				callback = callback,
+				forgetState = true,
+			})
+		end
+
+		function Library:CreateButton(tabData, text, callback)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			return tab:CreateButton({
+				name = tostring(text),
+				callback = callback,
+			})
+		end
+
+		function Library:CreateTextBox(tabData, labelText, placeholder, callback)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			return tab:CreateInput({
+				name = tostring(labelText),
+				placeholder = placeholder,
+				callback = callback,
+				forgetState = true,
+			})
+		end
+
+		local isMouseKey = function(v)
+			return type(v) == "string" and v:match("^MouseButton%d$") ~= nil
+		end
+
+		function Library:CreateKeybind(tabData, action, displayName)
+			local tab = getTab(tabData)
+			if not tab then return nil end
+			local current = _G.Keybinds and _G.Keybinds[action]
+			local initialValue = nil
+			if current and current ~= "" and not isMouseKey(current) then
+				local ok, key = pcall(function() return Enum.KeyCode[current] end)
+				if ok then initialValue = key end
+			end
+			return tab:CreateKeybind({
+				name = tostring(displayName),
+				value = initialValue,
+				onChanged = function(newKey)
+					local keyName = (typeof(newKey) == "EnumItem" and newKey.Name) or tostring(newKey)
+					-- Кнопки мыши игнорируем: бинд остаётся прежним
+					if isMouseKey(keyName) then return end
+					if _G.Keybinds then
+						_G.Keybinds[action] = keyName
+						if SaveKeybinds then SaveKeybinds() end
+					end
+				end,
+				forgetState = true,
+			})
+		end
+
+		-- Вкладка выбора стендов/скинов: дерево проходится через дропдаун,
+		-- "< Back" возвращает на уровень вверх, выбор листа вызывает
+		-- callback(selectedStand, value) — как в оригинале.
+		function Library:CreateStandTab(classLabel, title, entries, callback)
+			local tab = getTab(classLabel)
+			if not tab then return nil end
+			entries = entries or {}
+
+			local history = {}
+			local currentEntries = entries
+			local selectedStand = nil
+			local selectedValue = nil
+
+			local function normalizeEntry(entry)
+				if type(entry) == "table" then
+					return entry.Text or entry.Name or entry.Title or tostring(entry[1] or "Item"),
+						entry.Items or entry.Skins or entry.Children or entry[2],
+						entry.Value or entry.Id or entry.Text or entry.Name or entry.Title or tostring(entry[1] or "Item")
+				end
+				return tostring(entry), nil, tostring(entry)
+			end
+
+				-- Если передан всего один стенд — сразу показываем его скины,
+				-- без промежуточного списка названий стендов
+				if #entries == 1 then
+					local _, children, value = normalizeEntry(entries[1])
+					if children and #children > 0 then
+						selectedStand = value
+						currentEntries = children
+					end
+				end
+
+			local function currentOptions()
+				local opts = {}
+				if #history > 0 then opts[#opts + 1] = "< Back" end
+				for _, entry in ipairs(currentEntries) do
+					local text = normalizeEntry(entry)
+					opts[#opts + 1] = text
+				end
+				return opts
+			end
+
+			tab:CreateSection({ name = tostring(title or "Stands") })
+
+			local dropdown
+			dropdown = tab:CreateDropdown({
+				name = tostring(title or "Stands"),
+				options = currentOptions(),
+				forgetState = true,
+				callback = function(sel)
+					local choice = (type(sel) == "table") and sel[1] or sel
+					if choice == "< Back" then
+						currentEntries = table.remove(history) or entries
+						if #history == 0 then selectedStand = nil end
+						dropdown:Refresh(currentOptions())
+					else
+						for _, entry in ipairs(currentEntries) do
+							local text, children, value = normalizeEntry(entry)
+							if text == choice then
+								if children and #children > 0 then
+									selectedStand = value
+									table.insert(history, currentEntries)
+									currentEntries = children
+									dropdown:Refresh(currentOptions())
+								else
+									selectedValue = value
+									if callback then callback(selectedStand, value) end
+								end
+								break
+							end
+						end
+					end
+				end,
+			})
+
+			return {
+				SetItems = function(newEntries)
+					entries = newEntries or {}
+					currentEntries = entries
+					history = {}
+					selectedStand = nil
+					dropdown:Refresh(currentOptions())
+				end,
+				GetSelected = function() return selectedValue end,
+				SetSelected = function(value) selectedValue = value end,
+			}
+		end
+
+		function Library:SetTheme(name)
+			if not window then return end
+			local themes = {
+				Monochrome = "Default",
+				Violet = "Amethyst",
+				Crimson = "Rose",
+				Emerald = "GreenForest",
+			}
+			local theme = themes[tostring(name)] or "Default"
+			local ok = pcall(function() window:ChangeTheme(theme) end)
+			if not ok and theme ~= "Default" then
+				pcall(function() window:ChangeTheme("Default") end)
+			end
+		end
+
+		function Library:LayoutFunctionTabs() end
+		function Library:UpdateSubPositions() end
+
+		function Library:DestroyUI()
+			if window then
+				pcall(function() window:Unload() end)
+				window = nil
+			end
+		end
+	end
 
 	Library:CreateMainUI()
 
@@ -6138,110 +6499,33 @@ do
 		_G.Config.changeBoxColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Box, R", _G.Config.boxR, 0, 255, function(v)
-		_G.Config.boxR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Box, G", _G.Config.boxG, 0, 255, function(v)
-		_G.Config.boxG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Box, B", _G.Config.boxB, 0, 255, function(v)
-		_G.Config.boxB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Box Color", "boxR", "boxG", "boxB")
 	Library:CreateToggle(advancedSettingsSection, "Change Name Color", _G.Config.changeNameColor, function(v)
 		_G.Config.changeNameColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Name, R", _G.Config.nameR, 0, 255, function(v)
-		_G.Config.nameR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Name, G", _G.Config.nameG, 0, 255, function(v)
-		_G.Config.nameG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Name, B", _G.Config.nameB, 0, 255, function(v)
-		_G.Config.nameB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Name Color", "nameR", "nameG", "nameB")
 	Library:CreateToggle(advancedSettingsSection, "Change Distance Color", _G.Config.changeDistanceColor, function(v)
 		_G.Config.changeDistanceColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Distance, R", _G.Config.distanceR, 0, 255, function(v)
-		_G.Config.distanceR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Distance, G", _G.Config.distanceG, 0, 255, function(v)
-		_G.Config.distanceG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Distance, B", _G.Config.distanceB, 0, 255, function(v)
-		_G.Config.distanceB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Distance Color", "distanceR", "distanceG", "distanceB")
 	Library:CreateToggle(advancedSettingsSection, "Change Skeleton Color", _G.Config.changeSkeletonColor, function(v)
 		_G.Config.changeSkeletonColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Skeleton, R", _G.Config.skeletonR, 0, 255, function(v)
-		_G.Config.skeletonR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Skeleton, G", _G.Config.skeletonG, 0, 255, function(v)
-		_G.Config.skeletonG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Skeleton, B", _G.Config.skeletonB, 0, 255, function(v)
-		_G.Config.skeletonB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Skeleton Color", "skeletonR", "skeletonG", "skeletonB")
 	Library:CreateToggle(advancedSettingsSection, "Change Tracer Color", _G.Config.changeTracerColor, function(v)
 		_G.Config.changeTracerColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Tracer, R", _G.Config.tracerR, 0, 255, function(v)
-		_G.Config.tracerR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Tracer, G", _G.Config.tracerG, 0, 255, function(v)
-		_G.Config.tracerG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Tracer, B", _G.Config.tracerB, 0, 255, function(v)
-		_G.Config.tracerB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Tracer Color", "tracerR", "tracerG", "tracerB")
 	Library:CreateToggle(advancedSettingsSection, "Change Selected Tag Color", _G.Config.changeSelectedTagColor, function(v)
 		_G.Config.changeSelectedTagColor = v
 		SaveConfig()
 	end)
-	Library:CreateSlider(advancedSettingsSection, "Selected Tag, R", _G.Config.selectedTagR, 0, 255, function(v)
-		_G.Config.selectedTagR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Selected Tag, G", _G.Config.selectedTagG, 0, 255, function(v)
-		_G.Config.selectedTagG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Selected Tag, B", _G.Config.selectedTagB, 0, 255, function(v)
-		_G.Config.selectedTagB = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Show Attacks, R", _G.Config.saR, 0, 255, function(v)
-		_G.Config.saR = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Show Attacks, G", _G.Config.saG, 0, 255, function(v)
-		_G.Config.saG = math.floor(v)
-		SaveConfig()
-	end)
-	Library:CreateSlider(advancedSettingsSection, "Show Attacks, B", _G.Config.saB, 0, 255, function(v)
-		_G.Config.saB = math.floor(v)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(advancedSettingsSection, "Selected Tag Color", "selectedTagR", "selectedTagG", "selectedTagB")
+	Library:CreateColorPicker(advancedSettingsSection, "Show Attacks Color", "saR", "saG", "saB")
 	Library:CreateToggle(advancedSettingsSection, "Change Max Visibility Distance", _G.Config.changeMaxVisibilityDistance, function(v)
 		_G.Config.changeMaxVisibilityDistance = v
 		SaveConfig()
@@ -6558,7 +6842,8 @@ do
 			_G.lastDashTime = _G.lastDashTime or 0
 			_G.connectionUserInput = game:GetService("UserInputService").InputBegan:Connect(function(input, gameProcessed)
 				if gameProcessed then return end
-				if input.KeyCode ~= Enum.KeyCode[dashVal.Value] then return end
+				local okDashKey, dashKey = pcall(function() return Enum.KeyCode[dashVal.Value] end)
+				if not okDashKey or input.KeyCode ~= dashKey then return end
 
 				local LocalPlayer = game:GetService("Players").LocalPlayer
 				local char = LocalPlayer.Character
@@ -7128,7 +7413,7 @@ do
 		if not _G.Config.enableBoxModify then return end
 		if not pidoras_ebaniy() then return end
 		if not game:GetService("Players").LocalPlayer.PlayerStats.Spec.Value == "Boxing" then return end
-		if inp.KeyCode == getKey("boxingShuffle") and _G.crackeSandwichCD then
+		if inputMatchesBind(inp, "boxingShuffle") and _G.crackeSandwichCD then
 			_G.crackeSandwichCD = false
 			events()
 			task.wait(_G.Config.shuffleCd)
@@ -7209,9 +7494,6 @@ do
 	local camera = workspace.CurrentCamera
 	local tab_misc = Library:CreateClass("Misc")
 	local visualsSection = Library:CreateFunctionTab(tab_misc, "Visuals")
-	local skinChangerSection = Library:CreateFunctionTab(tab_misc, "Skin Changer")
-	local removalsSection = Library:CreateFunctionTab(tab_misc, "Removals")
-	local oldSection = Library:CreateFunctionTab(tab_misc, "Old YBA")
 	function applyFov()
 		local camera = workspace.CurrentCamera
 		if camera then
@@ -7308,6 +7590,7 @@ do
 		SaveConfig()
 	end)
 	local finishersList = {"Tom", "Huh", "Huh #2", "GET OUT", "Bruh Moment", "God's Lightning", "Pillarman", "Sub-Zero", "Wither", "Lineage Wipe", "Minecraft", "Killer Queen Detonate", "Shiza", "Gate of Babylon", "Aincrad", "Announcer", "Hyperlaser", "Vampire Ripple", "Disintegrate"}
+	local skinChangerSection = Library:CreateFunctionTab(tab_misc, "Skin Changer")
 	Library:CreateDropdown(skinChangerSection, "Finishers", finishersList, _G.Config.Finisher, false, function(val)
 		_G.Config.Finisher = val
 		SaveConfig()
@@ -7369,6 +7652,7 @@ do
 
 		end
 	end)
+	local removalsSection = Library:CreateFunctionTab(tab_misc, "Removals")
 	Library:CreateToggle(removalsSection, "Mobile UI", _G.Config.mobileUi, function(val)
 		_G.Config.mobileUi = val
 		if _G.mbbbz then _G.mbbbz:Disconnect() end
@@ -7417,6 +7701,7 @@ do
 		end
 		SaveConfig()
 	end)
+	local oldSection = Library:CreateFunctionTab(tab_misc, "Old")
 	Library:CreateToggle(oldSection, "Old BlockBreak and PerfectBlock", _G.Config.oldPbNbb,function(val)
 		_G.Config.oldPbNbb = val
 		SaveConfig()
@@ -7540,31 +7825,6 @@ do
 			end
 
 		end
-	end)
-	Library:CreateToggle(oldSection, "Old Water Texture", _G.Config.OldWaterTexture, function(val)
-		_G.Config.OldWaterTexture = val
-		local succ, err = pcall(function()
-			local ocean = getOcean()
-			if not ocean then return end
-			local hasTexture = ocean:FindFirstChild("WaterTextMaterial") ~= nil
-			if val then
-				ocean.BrickColor = BrickColor.new("Bright blue")
-				if hasTexture then ocean:FindFirstChild("WaterTextMaterial"):Destroy() end
-			else
-				ocean.BrickColor = BrickColor.new("Royal blue")
-				if not hasTexture then createWaterTexture() end
-			end
-		end)
-		if not succ then warn("[OLD WATER TEXTURE] " .. err) end
-		SaveConfig()
-	end)
-	Library:CreateToggle(oldSection, "Old Map Textures", _G.Config.OldMapTextures, function(val)
-		_G.Config.OldMapTextures = val
-		local succ, err = pcall(function()
-			updateMapTextures(val)
-		end)
-		if not succ then warn("[OLD MAP TEXTURES] " .. err) end
-		SaveConfig()
 	end)
 	Library:CreateToggle(oldSection, "Old Cooldowns", _G.Config.oldCooldowns, function(state)
 		_G.oldstate = _G.Config.oldCooldowns
@@ -7897,63 +8157,8 @@ do
 			end)
 		end)
 	end)
-	Library:CreateToggle(oldSection, "Old SP Stand", _G.Config.oldAnimationsSp, function(val)
-		if not val and _G.Config.oldAnimationsSp then
-			warn("rejoin may required")
-		end
-
-		_G.Config.oldAnimationsSp = val
-		SaveConfig()
-		if val then
-			local a,b=pcall(function()
-				toggleOldSpSummon(val)
-			end)
-			if not a then warn("[OLD SP STAND] " .. tostring(b)) end
-		else
-			toggleOldSpSummon(false)
-		end
-	end)
-
-	Library:CreateToggle(oldSection, "Old Boxing", _G.Config.oldAnimationsBox, function(val)
-		if not val and _G.Config.oldAnimationsBox then
-			warn("rejoin may required")
-		end
-
-		_G.Config.oldAnimationsBox = val
-		SaveConfig()
-
-
-		if not val then
-			if stopOldBox then stopOldBox() end
-			return
-		end 
-
-		local a, b = pcall(function()
-
-			local rs = game:GetService("ReplicatedStorage")
-
-			local jawbreaker2 = rs:FindFirstChild("Anims"):FindFirstChild("Boxing"):FindFirstChild("Jawbreaker")
-			if jawbreaker2 then
-				jawbreaker2.AnimationId = "rbxassetid://4211804997"
-			end
-
-			local livershot = rs:FindFirstChild("Anims"):FindFirstChild("Boxing"):FindFirstChild("Liver Shot")
-			if livershot then
-				livershot.AnimationId = "rbxassetid://4095625816"
-			end
-
-			for _, item in pairs(rs:FindFirstChild("Objects"):FindFirstChild("Boxing"):FindFirstChild("Jawbreaker"):GetChildren()) do
-				item:Destroy()
-			end
-			for _, item in pairs(rs:FindFirstChild("Objects"):FindFirstChild("Boxing"):FindFirstChild("Liver Shot"):GetChildren()) do
-				item:Destroy()
-			end
-
-			oldBox()
-		end)
-		if not a then warn("[OLD BOXING] " .. tostring(b)) end
-	end)
-	Library:CreateToggle(visualsSection, "Enable Custom Death Sound", _G.Config.enableCustomDeathSound, function(state)
+	local otherSection = Library:CreateFunctionTab(tab_misc, "Other")
+	Library:CreateToggle(otherSection, "Enable Custom Death Sound", _G.Config.enableCustomDeathSound, function(state)
 		local rs = game:GetService("ReplicatedStorage")
 
 		local death = rs:FindFirstChild("Sounds") and rs.Sounds:FindFirstChild("Knocked_Unconscious")
@@ -7967,7 +8172,7 @@ do
 		SaveConfig()
 	end)
 	local dsl = {"Re:Zero - Return By Death"}
-	Library:CreateDropdown(visualsSection, "Death Sound List", dsl, _G.Config.customDeathSound, false, function(v)
+	Library:CreateDropdown(otherSection, "Death Sound List", dsl, _G.Config.customDeathSound, false, function(v)
 		if not _G.Config.enableCustomDeathSound then return end
 
 		local rs = game:GetService("ReplicatedStorage")
@@ -7990,7 +8195,7 @@ do
 		end
 		SaveConfig()
 	end)
-	Library:CreateToggle(visualsSection, "'The Tallest Peak' Exploit", _G.Config.ttpExploit, function(state)
+	Library:CreateToggle(otherSection, "'The Tallest Peak' Exploit", _G.Config.ttpExploit, function(state)
 		_G.Config.ttpExploit = state
 		if state then
 			pcall(function()
@@ -8011,26 +8216,15 @@ do
 		end
 		SaveConfig()
 	end)
-	Library:CreateToggle(visualsSection, "Enable Stand Aura Changer", _G.Config.standAuraEnabled, function(state)
+	Library:CreateToggle(otherSection, "Enable Stand Aura Changer", _G.Config.standAuraEnabled, function(state)
 		_G.Config.standAuraEnabled = state
 		SaveConfig()
 	end)
-	Library:CreateToggle(visualsSection, "RGB Mode", _G.Config.standAuraRgb, function(state)
+	Library:CreateToggle(otherSection, "RGB Mode", _G.Config.standAuraRgb, function(state)
 		_G.Config.standAuraRgb = state
 		SaveConfig()
 	end)
-	Library:CreateSlider(visualsSection, "Aura, R", _G.Config.standAuraR, 0, 255, function(val)
-		_G.Config.standAuraR = math.floor(val)
-		SaveConfig()
-	end)
-	Library:CreateSlider(visualsSection, "Aura, G", _G.Config.standAuraG, 0, 255, function(val)
-		_G.Config.standAuraG = math.floor(val)
-		SaveConfig()
-	end)
-	Library:CreateSlider(visualsSection, "Aura, B", _G.Config.standAuraB, 0, 255, function(val)
-		_G.Config.standAuraB = math.floor(val)
-		SaveConfig()
-	end)
+	Library:CreateColorPicker(otherSection, "Aura Color", "standAuraR", "standAuraG", "standAuraB")
 
 
 	local Event = game:GetService("ReplicatedStorage").ClientFX
@@ -8080,137 +8274,8 @@ do
 		applyStandAura()
 	end)
 
-	-- PLAYERS INFO TAB
-	local tab_playersInfo = Library:CreateClass("Players Info")
-	local infoSection = Library:CreateFunctionTab(tab_playersInfo, "Information")
-
-	-- main info
-	local playerlist_player = nil
-	local playersOnServer = {} -- all players
-	local playerPrestigeList = {}
-	local playerLvlList = {}
-	local playerGangList = {}
-	local playerStandsList = {} -- all his stands(equipped, 1, 2, 3 etc)
-	local playerSpecsList = {} -- all his specs(equipped, 1, 2 etc)
-	local playerBackpackList = {}
-	local playerMoneyList = {}
-
-	-- show information
-	local playerMoney = Library:CreateDropdown(infoSection, "Money", playerMoneyList, playerMoneyList[1], false, function(val)
-	end, true, true)
-	local playerPrestige = Library:CreateDropdown(infoSection, "Prestige", playerPrestigeList, playerPrestigeList[1], false, function(val)
-	end, true, true)
-	local playerLvl = Library:CreateDropdown(infoSection, "Level", playerLvlList, playerLvlList[1], false, function(val)
-	end, true, true)
-	local playerGang = Library:CreateDropdown(infoSection, "Gang", playerGangList, playerGangList[1], false, function(val)
-	end, true, true)
-	local playerStands = Library:CreateDropdown(infoSection, "Stands", playerStandsList, playerStandsList[1], false, function(val)
-	end, true, true)
-	local playerSpecs = Library:CreateDropdown(infoSection, "Fighting Styles", playerSpecsList, playerSpecsList[1], false, function(val)
-	end, true, true)
-	local playerBackpack = Library:CreateDropdown(infoSection, "Backpack", playerBackpackList, playerBackpackList[1], false, function(val)
-	end, true, true)
-
-	local playersSection = Library:CreateFunctionTab(tab_playersInfo, "Players")
-	local playerList = Library:CreateDropdown(playersSection, "Player", playersOnServer, playersOnServer[1], false, function(val)
-		if not val or val == "None" then
-			return
-		end
-		if val:match("(selected)") then
-			val = val:gsub("%s*%(selected%)%s*", ""):match("^%s*(.-)%s*$")
-		end
-		playerlist_player = val
-	end)
-	Library:CreateToggle(playersSection, "Selected Only", _G.Config.playersInfo_selectedOnly, function(v)
-		_G.Config.playersInfo_selectedOnly = v
-		SaveConfig()
-	end)
-
-	task.spawn(function()
-		local function getPlayerStatText(playerStats, statName)
-			local stat = playerStats:FindFirstChild(statName)
-			return stat and tostring(stat.Value) or "None"
-		end
-
-		while true do
-			local succ, err = pcall(function()
-				local player = playerlist_player and game:GetService("Players"):FindFirstChild(playerlist_player) or nil
-				if player then
-					local playerStats = player:FindFirstChild("PlayerStats")
-					if playerStats then
-						playerPrestigeList = {getPlayerStatText(playerStats, "Prestige")}
-						playerLvlList = {getPlayerStatText(playerStats, "Level")}
-						playerGangList = {getPlayerStatText(playerStats, "Gang")}
-						playerMoneyList = {getPlayerStatText(playerStats, "Money")}
-						-- stands
-						playerStandsList = {getPlayerStatText(playerStats, "Stand") .. " (equipped)"}
-						for _, item in ipairs(playerStats:GetChildren()) do
-							if item.Name:match("Slot") and not item.Name:match("StyleSlot") then
-								table.insert(playerStandsList, item.Value)
-							end
-						end
-						-- specs
-						playerSpecsList = {getPlayerStatText(playerStats, "Spec") .. " (equipped)"}
-						for _, item in ipairs(playerStats:GetChildren()) do
-							if item.Name:match("StyleSlot") then
-								table.insert(playerSpecsList, item.Value)
-							end
-						end
-					end
-				end
-
-				local plr = playerlist_player and game:GetService("Players"):FindFirstChild(playerlist_player) or nil
-				if plr then
-					local backpack = plr:FindFirstChild("Backpack")
-					if backpack then
-						local counts = {}
-						playerBackpackList = {}
-						for _, item in ipairs(backpack:GetChildren()) do
-							local name = item.Name
-							counts[name] = (counts[name] or 0) + 1
-						end
-						for name, count in pairs(counts) do
-							table.insert(playerBackpackList, name .. " x" .. count)
-						end
-					end
-				end
-
-				updateDropdownItems(playerMoney, playerMoneyList)
-				updateDropdownItems(playerPrestige, playerPrestigeList)
-				updateDropdownItems(playerLvl, playerLvlList)
-				updateDropdownItems(playerGang, playerGangList)
-				updateDropdownItems(playerStands, playerStandsList)
-				updateDropdownItems(playerSpecs, playerSpecsList)
-				updateDropdownItems(playerBackpack, playerBackpackList)
-
-				playersOnServer = {}
-				for _, player in ipairs(game:GetService("Players"):GetPlayers()) do
-					if player.Name == _G.Config.input_TargetSurvName then    
-						if #playersOnServer >= 1 then
-							table.insert(playersOnServer, 2, player.Name .. " (selected)")
-						else
-							table.insert(playersOnServer, player.Name .. " (selected)")
-						end
-						if _G.Config.playersInfo_selectedOnly then
-							playerlist_player = player.Name
-						end
-					else
-						table.insert(playersOnServer, player.Name)
-					end
-				end
-				if (not playerlist_player or not game:GetService("Players"):FindFirstChild(playerlist_player)) and #playersOnServer > 0 then
-					playerlist_player = playersOnServer[1]:gsub("%s*%(selected%)%s*", ""):match("^%s*(.-)%s*$")
-				end
-				updateDropdownItems(playerList, playersOnServer)
-			end)
-			if not succ then warn("[player list] " .. err) end
-			task.wait(1)
-		end
-	end)
-
 	-- KEYBINDS
 	local keybindLabels = {
-		OpenMenu = "Open Menu Bind",
 		selectTarget = "Select Target Bind",
 		dash = "Dash Bind",
 		speedhack = "Speedhack Bind",
@@ -8223,7 +8288,6 @@ do
 	}
 
 	local keybindOrder = {
-		"OpenMenu",
 		"selectTarget",
 		"dash",
 		"speedhack",
@@ -8245,14 +8309,35 @@ do
 
 	local tab_keybinds = Library:CreateClass("Keybinds")
 	local keybindSection = Library:CreateFunctionTab(tab_keybinds, "Keybinds")
-	for _, action in ipairs(keybindOrder) do
-		if _G.Keybinds[action] ~= nil then
+
+	-- Показываем бинды только тех функций, которые включены в конфиге
+	local actionConfigFlags = {
+		dash = "enableDash",
+		speedhack = "enableSpeedhack",
+		fly = "enableFly",
+		aimbot = "enableAimbot",
+		standPilot = "standPilotEnabled",
+		boxingShuffle = "enableBoxModify",
+	}
+
+	local function isActionEnabled(action)
+		local flag = actionConfigFlags[action]
+		if not flag then return true end
+		return _G.Config[flag] == true
+	end
+
+	local function addKeybindIfEnabled(action)
+		if _G.Keybinds[action] ~= nil and isActionEnabled(action) then
 			Library:CreateKeybind(keybindSection, action, keybindLabels[action] or action)
 		end
 	end
+
+	for _, action in ipairs(keybindOrder) do
+		addKeybindIfEnabled(action)
+	end
 	for action in pairs(_G.Keybinds) do
 		if not containsKeybindAction(action) then
-			Library:CreateKeybind(keybindSection, action, keybindLabels[action] or action)
+			addKeybindIfEnabled(action)
 		end
 	end
 
@@ -8766,7 +8851,8 @@ do
 		print("[DB] Loaded " .. #_G.skinChanger_stands .. " entries")
 	end
 	LoadSkinDB()
-	createStandTab(tab_stands, "Stand Skins", {
+	-- Скины показываем только для стенда, который одет сейчас
+	local allStandSkinEntries = {
 		{Name = "Star Platinum", Skins = {"None", "Star Waifu", "Jack-O-Platinum", "Luffy Gear 4", "Sumo Platinum", "Ova Platinum"}},
 		{Name = "Star Platinum: The World", Skins = {"None", "Haunted Jack-O-Platinum", "Jack-O-Platinum", "Festive Platinum", "Digital Star Platinum", "Star Platinum: Stone Ocean","Star Waifu", "Luffy Gear 4", "Sumo Platinum", "Ova Platinum", "Ova SP"}},
 		{Name = "The World", Skins = {"None", "The Waifu v1", "Ghost World", "Festive World", "Shadow The World", "Sumo World", "Arlong", "The World Greatest High", "The Waifu v2", "Ova The World"}},
@@ -8790,7 +8876,30 @@ do
 		{Name = "Weather Report", Skins = {"None", "Aang", "Korra", "Zeus OP"}},
 		{Name = "Diver Down", Skins = {"None", "Diva Down", "Bondrewd", "Bubblegum", "Cthulhu", "Deep Sea Diver", "Mermaid", "Nautilodaunt"}},
 		{Name = "Magicans Red", Skins = {"None", "Undead Flare"}}
-	}, function(stand, skin)
+	}
+
+	local currentStandName = nil
+	do
+		local stats = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerStats")
+		local standVal = stats and stats:FindFirstChild("Stand")
+		if standVal and standVal:IsA("StringValue") then
+			currentStandName = standVal.Value
+		end
+	end
+
+	local standSkinEntries = {}
+	if currentStandName then
+		for _, entry in ipairs(allStandSkinEntries) do
+			if entry.Name == currentStandName then
+				table.insert(standSkinEntries, entry)
+				break
+			end
+		end
+	else
+		standSkinEntries = allStandSkinEntries
+	end
+
+	createStandTab(tab_stands, "Stand Skins", standSkinEntries, function(stand, skin)
 		print('[DEBUG.2924] st: ' .. stand .. ' | sk: ' .. skin)
 		if skin == "None" then
 			_G.skinChanger_stands[stand] = nil
@@ -8820,6 +8929,104 @@ do
 
 		_G.skinChanger_stands[stand] = found
 		SaveSkinDB()
+	end)
+
+	-- SETTINGS TAB (последняя вкладка)
+	local tab_settings = Library:CreateClass("Settings")
+
+	local configSection = Library:CreateFunctionTab(tab_settings, "Config")
+
+	local currentProfileName = ""
+
+	Library:CreateTextBox(configSection, "Config Name", "Enter config name...", function(text)
+		currentProfileName = text
+	end)
+
+	local configList = ListProfiles and ListProfiles() or {}
+	local configDropdown = Library:CreateDropdown(configSection, "Saved Configs", configList, configList[1], false, function(v)
+		if v and v ~= "None" then
+			currentProfileName = v
+		end
+	end)
+
+	local function refreshProfiles()
+		configList = ListProfiles and ListProfiles() or {}
+		configDropdown:SetItems(configList)
+	end
+
+	-- Перезапуск скрипта, чтобы загруженные настройки применились ко всему UI
+	local function reloadScript()
+		local ok = pcall(function()
+			local copy = script:Clone()
+			copy.Parent = script.Parent
+		end)
+		if ok then
+			script:Destroy()
+		else
+			warn("[SETTINGS] Не удалось перезапустить скрипт — настройки применятся после перезахода")
+		end
+	end
+
+	Library:CreateButton(configSection, "Save Config", function()
+		local name = string.gsub(currentProfileName or "", "^%s+", "")
+		name = string.gsub(name, "%s+$", "")
+		if name == "" then
+			warn("[SETTINGS] Введите имя конфига")
+			return
+		end
+		local ok, err = SaveProfile(name)
+		if ok then
+			print("[SETTINGS] Конфиг сохранён: " .. name)
+			refreshProfiles()
+			configDropdown:SetValue(name)
+		else
+			warn("[SETTINGS] Ошибка сохранения конфига: " .. tostring(err))
+		end
+	end)
+
+	Library:CreateButton(configSection, "Load Config", function()
+		local selected = configDropdown:GetValue()
+		if not selected or selected == "None" then
+			warn("[SETTINGS] Сначала выберите конфиг для загрузки")
+			return
+		end
+		local data = LoadProfileData(selected)
+		if not data then
+			warn("[SETTINGS] Не удалось загрузить конфиг: " .. tostring(selected))
+			return
+		end
+		for k in pairs(_G.Config) do _G.Config[k] = nil end
+		for k, v in pairs(data) do _G.Config[k] = v end
+		SaveConfig()
+		print("[SETTINGS] Конфиг загружен: " .. selected .. " — перезапускаю скрипт...")
+		reloadScript()
+	end)
+
+	Library:CreateButton(configSection, "Delete Config", function()
+		local selected = configDropdown:GetValue()
+		if not selected or selected == "None" then
+			warn("[SETTINGS] Сначала выберите конфиг для удаления")
+			return
+		end
+		if DeleteProfile(selected) then
+			print("[SETTINGS] Конфиг удалён: " .. selected)
+			refreshProfiles()
+		else
+			warn("[SETTINGS] Не удалось удалить конфиг")
+		end
+	end)
+
+	Library:CreateButton(configSection, "Reset To Defaults", function()
+		ResetConfigToDefaults()
+		print("[SETTINGS] Настройки сброшены до начальных — перезапускаю скрипт...")
+		reloadScript()
+	end)
+
+	local themeSection = Library:CreateFunctionTab(tab_settings, "Theme")
+	Library:CreateDropdown(themeSection, "UI Theme", {"Monochrome", "Emerald", "Violet", "Crimson"}, _G.Config.uiTheme, false, function(v)
+		if Library.SetTheme then
+			Library:SetTheme(v)
+		end
 	end)
 
 	local player = game:GetService("Players").LocalPlayer
